@@ -7,12 +7,14 @@ on:
       - 'configs/**'
       - 'scripts/**'
       - 'board_meta/**'
+      - 'upstream.json'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'configs/**'
       - 'scripts/**'
       - 'board_meta/**'
+      - 'upstream.json'
       - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
@@ -66,15 +68,26 @@ jobs:
           echo "env_name=${ENV_NAME}" >> "$GITHUB_OUTPUT"
           echo "Building env: ${ENV_NAME} from ${{ matrix.config }}"
 
-      - name: Read driver repo URL from config
-        id: driver-info
+      - name: Read upstream pins
+        id: upstream
         run: |
-          URL=$(python3 -c "import json; print(json.load(open('${{ matrix.config }}'))['URL'])")
+          URL=$(python3 -c "import json; print(json.load(open('upstream.json'))['driver_url'])")
+          REF=$(python3 -c "import json; print(json.load(open('upstream.json')).get('driver_ref', ''))")
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
 
       - name: Clone driver repo
         run: |
-          git clone --recurse-submodules --depth 1 "${{ steps.driver-info.outputs.url }}" driver
+          REF="${{ steps.upstream.outputs.ref }}"
+          URL="${{ steps.upstream.outputs.url }}"
+          if [ -n "$REF" ]; then
+            git clone --filter=blob:none --no-checkout --recurse-submodules=no "$URL" driver
+            cd driver
+            git checkout "$REF"
+            git submodule update --init --recursive --depth 1
+          else
+            git clone --recurse-submodules --depth 1 "$URL" driver
+          fi
 
       - name: Generate platformio.local.ini
         run: |
@@ -82,7 +95,8 @@ jobs:
             --config "${{ matrix.config }}" \
             --driver-dir driver \
             --board-meta board_meta \
-            --env-name "${{ steps.env-name.outputs.env_name }}"
+            --env-name "${{ steps.env-name.outputs.env_name }}" \
+            --upstream upstream.json
 
       - name: Install my_plugin sources
         run: |

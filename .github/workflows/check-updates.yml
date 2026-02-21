@@ -1,0 +1,187 @@
+name: Check Upstream Updates
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read current pins
+        id: current
+        run: |
+          DRIVER_URL=$(python3 -c "import json; print(json.load(open('upstream.json'))['driver_url'])")
+          DRIVER_REF=$(python3 -c "import json; print(json.load(open('upstream.json')).get('driver_ref', ''))")
+          echo "driver_url=${DRIVER_URL}" >> "$GITHUB_OUTPUT"
+          echo "driver_ref=${DRIVER_REF}" >> "$GITHUB_OUTPUT"
+
+          # Read dep pins as JSON
+          DEPS=$(python3 -c "import json; print(json.dumps(json.load(open('upstream.json')).get('deps', {})))")
+          echo "deps=${DEPS}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for upstream updates
+        id: check
+        run: |
+          CHANGED=false
+          DRIVER_URL="${{ steps.current.outputs.driver_url }}"
+          OLD_DRIVER_REF="${{ steps.current.outputs.driver_ref }}"
+
+          # Check driver repo HEAD
+          NEW_DRIVER_REF=$(git ls-remote "$DRIVER_URL" HEAD | awk '{print $1}')
+          echo "new_driver_ref=${NEW_DRIVER_REF}" >> "$GITHUB_OUTPUT"
+
+          if [ "$OLD_DRIVER_REF" != "$NEW_DRIVER_REF" ]; then
+            CHANGED=true
+            echo "driver_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "driver_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Check each dep
+          DEPS='${{ steps.current.outputs.deps }}'
+          DEP_UPDATES=$(python3 -c "
+          import json, subprocess
+          deps = json.loads('$DEPS')
+          updates = {}
+          for url, old_sha in deps.items():
+              result = subprocess.run(['git', 'ls-remote', url, 'HEAD'], capture_output=True, text=True)
+              new_sha = result.stdout.split()[0] if result.stdout.strip() else old_sha
+              if old_sha != new_sha:
+                  updates[url] = {'old': old_sha, 'new': new_sha}
+          print(json.dumps(updates))
+          ")
+          echo "dep_updates=${DEP_UPDATES}" >> "$GITHUB_OUTPUT"
+
+          if [ "$DEP_UPDATES" != "{}" ]; then
+            CHANGED=true
+          fi
+
+          echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
+
+      - name: Update upstream.json
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          python3 << 'PYEOF'
+          import json
+
+          with open("upstream.json") as f:
+              upstream = json.load(f)
+
+          driver_changed = "${{ steps.check.outputs.driver_changed }}" == "true"
+          if driver_changed:
+              upstream["driver_ref"] = "${{ steps.check.outputs.new_driver_ref }}"
+
+          dep_updates = json.loads('${{ steps.check.outputs.dep_updates }}')
+          for url, shas in dep_updates.items():
+              upstream["deps"][url] = shas["new"]
+
+          with open("upstream.json", "w") as f:
+              json.dump(upstream, f, indent=2)
+              f.write("\n")
+          PYEOF
+
+      - name: Get grblHAL core build date
+        if: steps.check.outputs.changed == 'true' && steps.check.outputs.driver_changed == 'true'
+        continue-on-error: true
+        id: build-date
+        run: |
+          DRIVER_URL="${{ steps.current.outputs.driver_url }}"
+          NEW_REF="${{ steps.check.outputs.new_driver_ref }}"
+
+          # Clone just enough of the driver to find the core submodule SHA
+          git clone --filter=blob:none --no-checkout --recurse-submodules=no "$DRIVER_URL" _driver_tmp
+          cd _driver_tmp
+          git checkout "$NEW_REF" -- .gitmodules
+          git checkout "$NEW_REF"
+
+          # Get core submodule URL and SHA
+          CORE_URL=$(git config -f .gitmodules submodule.grbl.url 2>/dev/null || echo "")
+          CORE_SHA=$(git ls-tree "$NEW_REF" grbl 2>/dev/null | awk '{print $3}')
+          cd ..
+
+          BUILD_DATE="unknown"
+          if [ -n "$CORE_URL" ] && [ -n "$CORE_SHA" ]; then
+            # Fetch changelog.md from core at the submodule SHA
+            CHANGELOG=$(curl -sL "https://raw.githubusercontent.com/grblHAL/core/${CORE_SHA}/changelog.md" 2>/dev/null || echo "")
+            if [ -n "$CHANGELOG" ]; then
+              BUILD_DATE=$(echo "$CHANGELOG" | grep -oP '<a name="\K\d{8}' | head -1 || echo "unknown")
+            fi
+          fi
+
+          echo "date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          rm -rf _driver_tmp
+
+      - name: Create or update PR
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="auto-update/upstream"
+
+          # Build PR body
+          BODY="## Upstream Update"
+          BODY="${BODY}\n"
+
+          DRIVER_CHANGED="${{ steps.check.outputs.driver_changed }}"
+          if [ "$DRIVER_CHANGED" = "true" ]; then
+            OLD="${{ steps.current.outputs.driver_ref }}"
+            NEW="${{ steps.check.outputs.new_driver_ref }}"
+            DRIVER_URL="${{ steps.current.outputs.driver_url }}"
+            BUILD_DATE="${{ steps.build-date.outputs.date }}"
+            BODY="${BODY}\n### Driver (STM32F4xx)"
+            BODY="${BODY}\n- \`${OLD:0:12}\` -> \`${NEW:0:12}\`"
+            BODY="${BODY}\n- [Compare changes](${DRIVER_URL}/compare/${OLD}...${NEW})"
+            if [ "$BUILD_DATE" != "unknown" ] && [ -n "$BUILD_DATE" ]; then
+              BODY="${BODY}\n- grblHAL core build date: **${BUILD_DATE}**"
+            fi
+          fi
+
+          DEP_UPDATES='${{ steps.check.outputs.dep_updates }}'
+          if [ "$DEP_UPDATES" != "{}" ]; then
+            BODY="${BODY}\n\n### Dependencies"
+            python3 -c "
+          import json
+          updates = json.loads('${DEP_UPDATES}')
+          for url, shas in updates.items():
+              name = url.rstrip('/').split('/')[-1]
+              old_short = shas['old'][:12]
+              new_short = shas['new'][:12]
+              print(f'- **{name}**: \`{old_short}\` -> \`{new_short}\`')
+              print(f'  - [Compare changes]({url}/compare/{shas[\"old\"]}...{shas[\"new\"]})')
+          " >> /tmp/dep_body.txt
+            BODY="${BODY}\n$(cat /tmp/dep_body.txt)"
+          fi
+
+          BODY="${BODY}\n\n---\nThis PR was automatically created by the check-updates workflow."
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create or update branch
+          git checkout -B "$BRANCH"
+          git add upstream.json
+          git commit -m "Update upstream pins"
+          git push -f origin "$BRANCH"
+
+          # Check for existing PR
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo -e "$BODY" | gh pr edit "$EXISTING_PR" --body-file -
+            echo "Updated existing PR #${EXISTING_PR}"
+          else
+            echo -e "$BODY" | gh pr create \
+              --title "Update upstream pins" \
+              --body-file - \
+              --head "$BRANCH" \
+              --base main
+          fi

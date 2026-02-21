@@ -23,6 +23,9 @@ def parse_args():
     parser.add_argument(
         "--env-name", required=True, help="PlatformIO environment name"
     )
+    parser.add_argument(
+        "--upstream", default=None, help="Path to upstream.json for dependency pinning"
+    )
     return parser.parse_args()
 
 
@@ -82,6 +85,18 @@ def ensure_board_symbol(symbols, board_symbol):
     # Not present, add it
     symbols.insert(0, f"{key}=1")
     return symbols
+
+
+def apply_dep_pins(extra_lib_deps, deps):
+    """Append #SHA to GitHub lib_dep URLs that have a matching pin in deps."""
+    if not deps:
+        return extra_lib_deps
+    pinned = []
+    for dep in extra_lib_deps:
+        if dep in deps:
+            dep = f"{dep}#{deps[dep]}"
+        pinned.append(dep)
+    return pinned
 
 
 def generate_ini(env_name, pio_board, board_build_mcu, ldscript, symbols,
@@ -158,6 +173,11 @@ def main():
     json_symbols = config.get("symbols", [])
     symbols = merge_symbols(json_symbols, extra_symbols)
     symbols = ensure_board_symbol(symbols, board_symbol)
+
+    # Pin dependency versions from upstream.json
+    upstream = load_json(args.upstream) if args.upstream else {}
+    deps = upstream.get("deps", {})
+    extra_lib_deps = apply_dep_pins(extra_lib_deps, deps)
 
     # Detect networking
     networking = detect_networking(symbols)
