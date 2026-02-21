@@ -42,8 +42,12 @@ You can trigger a build manually from the Actions tab. Optionally specify a sing
 # Clone the driver repo at the pinned commit
 REF=$(python3 -c "import json; print(json.load(open('upstream.json'))['driver_ref'])")
 URL=$(python3 -c "import json; print(json.load(open('upstream.json'))['driver_url'])")
-git clone --filter=blob:none --no-checkout --recurse-submodules=no "$URL" driver
-cd driver && git checkout "$REF" && git submodule update --init --recursive --depth 1 && cd ..
+git init driver && cd driver
+git remote add origin "$URL"
+git fetch --depth 1 origin "$REF"
+git checkout FETCH_HEAD
+git submodule update --init --recursive --depth 1
+cd ..
 
 # Generate the PlatformIO config
 python3 scripts/generate_pio_config.py \

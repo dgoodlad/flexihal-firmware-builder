@@ -37,8 +37,9 @@ The upstream grblHAL STM32F4xx driver repo uses PlatformIO with `stm32cube` fram
 ```sh
 REF=$(python3 -c "import json; print(json.load(open('upstream.json'))['driver_ref'])")
 URL=$(python3 -c "import json; print(json.load(open('upstream.json'))['driver_url'])")
-git clone --filter=blob:none --no-checkout --recurse-submodules=no "$URL" driver
-cd driver && git checkout "$REF" && git submodule update --init --recursive --depth 1 && cd ..
+git init driver && cd driver && git remote add origin "$URL"
+git fetch --depth 1 origin "$REF" && git checkout FETCH_HEAD
+git submodule update --init --recursive --depth 1 && cd ..
 python3 scripts/generate_pio_config.py --config configs/dgoodlad-flexihal.json --driver-dir driver --board-meta board_meta --env-name dgoodlad_flexihal --upstream upstream.json
 python3 scripts/install_plugins.py --config configs/dgoodlad-flexihal.json --driver-dir driver
 pio run -d driver -e dgoodlad_flexihal

@@ -96,15 +96,15 @@ jobs:
           DRIVER_URL="${{ steps.current.outputs.driver_url }}"
           NEW_REF="${{ steps.check.outputs.new_driver_ref }}"
 
-          # Clone just enough of the driver to find the core submodule SHA
-          git clone --filter=blob:none --no-checkout --recurse-submodules=no "$DRIVER_URL" _driver_tmp
+          # Fetch just enough of the driver to find the core submodule SHA
+          git init _driver_tmp
           cd _driver_tmp
-          git checkout "$NEW_REF" -- .gitmodules
-          git checkout "$NEW_REF"
+          git remote add origin "$DRIVER_URL"
+          git fetch --depth 1 origin "$NEW_REF"
+          git checkout FETCH_HEAD
 
-          # Get core submodule URL and SHA
-          CORE_URL=$(git config -f .gitmodules submodule.grbl.url 2>/dev/null || echo "")
-          CORE_SHA=$(git ls-tree "$NEW_REF" grbl 2>/dev/null | awk '{print $3}')
+          # Get core submodule SHA from the tree
+          CORE_SHA=$(git ls-tree HEAD grbl 2>/dev/null | awk '{print $3}')
           cd ..
 
           BUILD_DATE="unknown"

@@ -81,9 +81,11 @@ jobs:
           REF="${{ steps.upstream.outputs.ref }}"
           URL="${{ steps.upstream.outputs.url }}"
           if [ -n "$REF" ]; then
-            git clone --filter=blob:none --no-checkout --recurse-submodules=no "$URL" driver
+            git init driver
             cd driver
-            git checkout "$REF"
+            git remote add origin "$URL"
+            git fetch --depth 1 origin "$REF"
+            git checkout FETCH_HEAD
             git submodule update --init --recursive --depth 1
           else
             git clone --recurse-submodules --depth 1 "$URL" driver
