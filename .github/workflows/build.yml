@@ -1,0 +1,136 @@
+name: Build grblHAL Firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - 'board_meta/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - 'board_meta/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      config_file:
+        description: 'Single config file to build (e.g. configs/dgoodlad-flexihal.json). Leave empty to build all.'
+        required: false
+        default: ''
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: set-matrix
+        run: |
+          if [ -n "${{ github.event.inputs.config_file }}" ]; then
+            # Single config from manual dispatch
+            FILES=$(echo '["${{ github.event.inputs.config_file }}"]')
+          else
+            # All JSON files in configs/
+            FILES=$(ls configs/*.json | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          fi
+          echo "matrix={\"config\":${FILES}}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Derive env name from config filename
+        id: env-name
+        run: |
+          # configs/dgoodlad-flexihal.json -> dgoodlad_flexihal
+          BASENAME=$(basename "${{ matrix.config }}" .json)
+          ENV_NAME=$(echo "$BASENAME" | tr '-' '_')
+          echo "env_name=${ENV_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Building env: ${ENV_NAME} from ${{ matrix.config }}"
+
+      - name: Read driver repo URL from config
+        id: driver-info
+        run: |
+          URL=$(python3 -c "import json; print(json.load(open('${{ matrix.config }}'))['URL'])")
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Clone driver repo
+        run: |
+          git clone --recurse-submodules --depth 1 "${{ steps.driver-info.outputs.url }}" driver
+
+      - name: Generate platformio.local.ini
+        run: |
+          python3 scripts/generate_pio_config.py \
+            --config "${{ matrix.config }}" \
+            --driver-dir driver \
+            --board-meta board_meta \
+            --env-name "${{ steps.env-name.outputs.env_name }}"
+
+      - name: Install my_plugin sources
+        run: |
+          python3 scripts/install_plugins.py \
+            --config "${{ matrix.config }}" \
+            --driver-dir driver
+
+      - name: Show generated config
+        run: cat driver/platformio.local.ini
+
+      - name: Build firmware
+        run: pio run -d driver -e "${{ steps.env-name.outputs.env_name }}"
+
+      - name: Collect firmware artifacts
+        run: |
+          mkdir -p artifacts
+          ENV_NAME="${{ steps.env-name.outputs.env_name }}"
+          BUILD_DIR="driver/.pio/build/${ENV_NAME}"
+          for ext in bin elf uf2; do
+            for f in "${BUILD_DIR}"/*.${ext}; do
+              [ -f "$f" ] && cp "$f" "artifacts/${ENV_NAME}_$(basename "$f")"
+            done
+          done
+          ls -la artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.env-name.outputs.env_name }}
+          path: artifacts/*
+
+  release:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_id }}.${{ github.run_number }}
+          name: Firmware Build ${{ github.run_id }}
+          files: release-assets/*
+          generate_release_notes: true
