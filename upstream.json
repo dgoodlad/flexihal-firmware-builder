@@ -1,6 +1,6 @@
 {
   "driver_url": "https://github.com/grblHAL/STM32F4xx",
-  "driver_ref": "eec20f0745bc4de414d66f82b9cbe707209218d4",
+  "driver_ref": "0f66d4e7c0259ce54ec174e7dc3a463658d2dca3",
   "deps": {
     "https://github.com/Expatria-Technologies/grblhal_probe_plugin": "254044b8229a9c593ad8bcac33699f0be57a231e"
   }
